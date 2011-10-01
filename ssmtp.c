@@ -25,6 +25,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <netdb.h>
+#include <grp.h>
 #ifdef HAVE_SSL
 #include <openssl/crypto.h>
 #include <openssl/x509.h>
@@ -70,6 +71,7 @@ char *root = NULL;
 char *tls_cert = "/etc/ssl/certs/ssmtp.pem";	/* Default Certificate */
 char *uad = (char)NULL;
 char *config_file = (char)NULL;		/* alternate configuration file */
+char *allowed_group = (char)NULL; /* if set, group that user must be in to send mail */
 
 headers_t headers, *ht;
 
@@ -853,6 +855,40 @@ char *firsttok(char **s, const char *delim)
 }
 
 /*
+Check if the user running this can send e-mail if AllowedGroup is set.
+ */
+bool_t user_can_mail() {
+	struct group *group;
+	struct passwd *user;
+	char **grpMembers;
+
+	if (allowed_group == (char) NULL) {
+		// not set in config, so we assume everyone can mail
+		return True;
+	}
+
+	if ((user = getpwuid(getuid())) == NULL) {
+		die("Unable to get passwd for user!");
+	}
+
+	if ((group = getgrnam(allowed_group)) == NULL) {
+		die("Unable to get group!");
+	}
+
+	grpMembers = group->gr_mem;
+
+	while (*grpMembers) {
+		if (strcmp(user->pw_name, *grpMembers) == 0) {
+			return True;
+		}
+
+		++grpMembers;
+	}
+
+	return False;
+}
+
+/*
 read_config() -- Open and parse config file and extract values of variables
 */
 bool_t read_config()
@@ -1074,6 +1110,15 @@ bool_t read_config()
 					log_event(LOG_INFO,
 						"Set UseOldAUTH=\"%s\"\n",
 						use_oldauth ? "True" : "False");
+				}
+			}
+			else if(strcasecmp(p, "AllowedGroup") == 0) {
+				if((allowed_group = strdup(q)) == (char *)NULL) {
+					die("parse_config() -- strdup() failed");
+				}
+
+				if(log_level > 0) {
+					log_event(LOG_INFO, "Set AllowedGroup=\"%s\"\n", allowed_group);
 				}
 			}
 			else if (strcasecmp(p, "Debug") == 0)
@@ -1424,13 +1469,19 @@ int ssmtp(char *argv[])
 	ht = &headers;
 
 	uid = getuid();
+
 	if((pw = getpwuid(uid)) == (struct passwd *)NULL) {
 		die("Could not find password entry for UID %d", uid);
 	}
+
 	get_arpadate(arpadate);
 
 	if(read_config() == False) {
 		log_event(LOG_INFO, "%s not found", config_file);
+	}
+
+	if(user_can_mail() == False) {
+		die("This user does not have permission to send mail!");
 	}
 
 	if((p = strtok(pw->pw_gecos, ";,"))) {
